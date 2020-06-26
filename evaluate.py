@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 import os
+import time
 
 
 def normalize_answer(s):
@@ -76,6 +77,38 @@ def evaluate(dataset, predictions):
     f1 = 100.0 * f1 / total
 
     return {"exact_match": exact_match, "f1": f1}
+
+
+def contrast_predict_and_real(
+    name="default predict",
+    dataset_file_path=os.getcwd() + "/squadv1.1/dev-v1.1.json",
+    predict_file_path=os.getcwd() + "/outputs/predictions.json",
+):
+    expected_version = "1.1"
+    with open(dataset_file_path) as dataset_file:
+        dataset_json = json.load(dataset_file)
+        if dataset_json["version"] != expected_version:
+            print(
+                "Evaluation expects v-"
+                + expected_version
+                + ", but got dataset with v-"
+                + dataset_json["version"],
+                file=sys.stderr,
+            )
+        dataset = dataset_json["data"]
+    with open(predict_file_path) as prediction_file:
+        predictions = json.load(prediction_file)
+
+    resultstr = json.dumps(evaluate(dataset, predictions))
+    print(resultstr)
+    processouterpath = os.getcwd() + "/outputs/history_process.txt"
+    if not os.path.exists(processouterpath):
+        bd = open(processouterpath, "w")
+        bd.close()
+    outer = open(processouterpath, "a")
+    timestr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+    outer.write("[" + timestr + "] " + name + " " + resultstr + "\n")
+    outer.close()
 
 
 if __name__ == "__main__":

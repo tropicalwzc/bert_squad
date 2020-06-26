@@ -28,15 +28,18 @@ import optimization
 import tokenization
 import six
 import tensorflow as tf
+from evaluate import contrast_predict_and_real
 
 flags = tf.flags
 
 FLAGS = flags.FLAGS
 
+premodelname = "uncased_L-4_H-256_A-4"
+
 basepath = os.getcwd()
-bertconfig_path = basepath + "/uncased_L-2_H-128_A-2/bert_config.json"
-bertvocab_path = basepath + "/uncased_L-2_H-128_A-2/vocab.txt"
-bertcheckpoint_path = basepath + "/uncased_L-2_H-128_A-2/bert_model.ckpt"
+bertconfig_path = basepath + "/" + premodelname + "/bert_config.json"
+bertvocab_path = basepath + "/" + premodelname + "/vocab.txt"
+bertcheckpoint_path = basepath + "/" + "outputs" + "/model.ckpt-38000"
 output_path = basepath + "/outputs"
 squadtrain_path = basepath + "/squadv1.1/train-v1.1.json"
 squaddev_path = basepath + "/squadv1.1/dev-v1.1.json"
@@ -106,18 +109,18 @@ flags.DEFINE_integer(
     "this will be truncated to this length.",
 )
 
-flags.DEFINE_bool("do_train", True, "Whether to run training.")
+flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_predict", True, "Whether to run eval on the dev set.")
 
-flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
+flags.DEFINE_integer("train_batch_size", 11, "Total batch size for training.")
 
-flags.DEFINE_integer("predict_batch_size", 32, "Total batch size for predictions.")
+flags.DEFINE_integer("predict_batch_size", 11, "Total batch size for predictions.")
 
-flags.DEFINE_float("learning_rate", 3e-4, "The initial learning rate for Adam.")
+flags.DEFINE_float("learning_rate", 1e-4, "The initial learning rate for Adam.")
 
 flags.DEFINE_float(
-    "num_train_epochs", 4.0, "Total number of training epochs to perform."
+    "num_train_epochs", 5.0, "Total number of training epochs to perform."
 )
 
 flags.DEFINE_float(
@@ -137,14 +140,14 @@ flags.DEFINE_integer(
 
 flags.DEFINE_integer(
     "n_best_size",
-    10,
+    3,
     "The total number of n-best predictions to generate in the "
     "nbest_predictions.json output file.",
 )
 
 flags.DEFINE_integer(
     "max_answer_length",
-    30,
+    10,
     "The maximum length of an answer that can be generated. This is needed "
     "because the start and end predictions are not conditioned on one another.",
 )
@@ -1265,6 +1268,79 @@ def validate_flags_or_throw(bert_config):
         )
 
 
+def predict_with_estimater(estimator, tokenizer, name="default"):
+    eval_examples = read_squad_examples(
+        input_file=FLAGS.predict_file, is_training=False
+    )
+
+    eval_writer = FeatureWriter(
+        filename=os.path.join(FLAGS.output_dir, "eval.tf_record"), is_training=False
+    )
+    eval_features = []
+
+    def append_feature(feature):
+        eval_features.append(feature)
+        eval_writer.process_feature(feature)
+
+    convert_examples_to_features(
+        examples=eval_examples,
+        tokenizer=tokenizer,
+        max_seq_length=FLAGS.max_seq_length,
+        doc_stride=FLAGS.doc_stride,
+        max_query_length=FLAGS.max_query_length,
+        is_training=False,
+        output_fn=append_feature,
+    )
+    eval_writer.close()
+
+    tf.logging.info("***** Running predictions *****")
+    tf.logging.info("  Num orig examples = %d", len(eval_examples))
+    tf.logging.info("  Num split examples = %d", len(eval_features))
+    tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+
+    all_results = []
+
+    predict_input_fn = input_fn_builder(
+        input_file=eval_writer.filename,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=False,
+    )
+
+    # If running eval on the TPU, you will need to specify the number of
+    # steps.
+    all_results = []
+    for result in estimator.predict(predict_input_fn, yield_single_examples=True):
+        if len(all_results) % 1000 == 0:
+            tf.logging.info("Processing example: %d" % (len(all_results)))
+        unique_id = int(result["unique_ids"])
+        start_logits = [float(x) for x in result["start_logits"].flat]
+        end_logits = [float(x) for x in result["end_logits"].flat]
+        all_results.append(
+            RawResult(
+                unique_id=unique_id, start_logits=start_logits, end_logits=end_logits,
+            )
+        )
+
+    output_prediction_file = os.path.join(FLAGS.output_dir, "predictions.json")
+    output_nbest_file = os.path.join(FLAGS.output_dir, "nbest_predictions.json")
+    output_null_log_odds_file = os.path.join(FLAGS.output_dir, "null_odds.json")
+
+    write_predictions(
+        eval_examples,
+        eval_features,
+        all_results,
+        FLAGS.n_best_size,
+        FLAGS.max_answer_length,
+        FLAGS.do_lower_case,
+        output_prediction_file,
+        output_nbest_file,
+        output_null_log_odds_file,
+    )
+
+    contrast_predict_and_real(name=name)
+
+
 def main(_):
     tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -1367,76 +1443,77 @@ def main(_):
         estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
 
     if FLAGS.do_predict:
-        eval_examples = read_squad_examples(
-            input_file=FLAGS.predict_file, is_training=False
-        )
+        predict_with_estimater(estimator, tokenizer, "test39000")
+        # eval_examples = read_squad_examples(
+        #     input_file=FLAGS.predict_file, is_training=False
+        # )
 
-        eval_writer = FeatureWriter(
-            filename=os.path.join(FLAGS.output_dir, "eval.tf_record"), is_training=False
-        )
-        eval_features = []
+        # eval_writer = FeatureWriter(
+        #     filename=os.path.join(FLAGS.output_dir, "eval.tf_record"), is_training=False
+        # )
+        # eval_features = []
 
-        def append_feature(feature):
-            eval_features.append(feature)
-            eval_writer.process_feature(feature)
+        # def append_feature(feature):
+        #     eval_features.append(feature)
+        #     eval_writer.process_feature(feature)
 
-        convert_examples_to_features(
-            examples=eval_examples,
-            tokenizer=tokenizer,
-            max_seq_length=FLAGS.max_seq_length,
-            doc_stride=FLAGS.doc_stride,
-            max_query_length=FLAGS.max_query_length,
-            is_training=False,
-            output_fn=append_feature,
-        )
-        eval_writer.close()
+        # convert_examples_to_features(
+        #     examples=eval_examples,
+        #     tokenizer=tokenizer,
+        #     max_seq_length=FLAGS.max_seq_length,
+        #     doc_stride=FLAGS.doc_stride,
+        #     max_query_length=FLAGS.max_query_length,
+        #     is_training=False,
+        #     output_fn=append_feature,
+        # )
+        # eval_writer.close()
 
-        tf.logging.info("***** Running predictions *****")
-        tf.logging.info("  Num orig examples = %d", len(eval_examples))
-        tf.logging.info("  Num split examples = %d", len(eval_features))
-        tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+        # tf.logging.info("***** Running predictions *****")
+        # tf.logging.info("  Num orig examples = %d", len(eval_examples))
+        # tf.logging.info("  Num split examples = %d", len(eval_features))
+        # tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
-        all_results = []
+        # all_results = []
 
-        predict_input_fn = input_fn_builder(
-            input_file=eval_writer.filename,
-            seq_length=FLAGS.max_seq_length,
-            is_training=False,
-            drop_remainder=False,
-        )
+        # predict_input_fn = input_fn_builder(
+        #     input_file=eval_writer.filename,
+        #     seq_length=FLAGS.max_seq_length,
+        #     is_training=False,
+        #     drop_remainder=False,
+        # )
 
-        # If running eval on the TPU, you will need to specify the number of
-        # steps.
-        all_results = []
-        for result in estimator.predict(predict_input_fn, yield_single_examples=True):
-            if len(all_results) % 1000 == 0:
-                tf.logging.info("Processing example: %d" % (len(all_results)))
-            unique_id = int(result["unique_ids"])
-            start_logits = [float(x) for x in result["start_logits"].flat]
-            end_logits = [float(x) for x in result["end_logits"].flat]
-            all_results.append(
-                RawResult(
-                    unique_id=unique_id,
-                    start_logits=start_logits,
-                    end_logits=end_logits,
-                )
-            )
+        # # If running eval on the TPU, you will need to specify the number of
+        # # steps.
+        # all_results = []
+        # for result in estimator.predict(predict_input_fn, yield_single_examples=True):
+        #     if len(all_results) % 1000 == 0:
+        #         tf.logging.info("Processing example: %d" % (len(all_results)))
+        #     unique_id = int(result["unique_ids"])
+        #     start_logits = [float(x) for x in result["start_logits"].flat]
+        #     end_logits = [float(x) for x in result["end_logits"].flat]
+        #     all_results.append(
+        #         RawResult(
+        #             unique_id=unique_id,
+        #             start_logits=start_logits,
+        #             end_logits=end_logits,
+        #         )
+        #     )
 
-        output_prediction_file = os.path.join(FLAGS.output_dir, "predictions.json")
-        output_nbest_file = os.path.join(FLAGS.output_dir, "nbest_predictions.json")
-        output_null_log_odds_file = os.path.join(FLAGS.output_dir, "null_odds.json")
+        # output_prediction_file = os.path.join(FLAGS.output_dir, "predictions.json")
+        # output_nbest_file = os.path.join(FLAGS.output_dir, "nbest_predictions.json")
+        # output_null_log_odds_file = os.path.join(FLAGS.output_dir, "null_odds.json")
 
-        write_predictions(
-            eval_examples,
-            eval_features,
-            all_results,
-            FLAGS.n_best_size,
-            FLAGS.max_answer_length,
-            FLAGS.do_lower_case,
-            output_prediction_file,
-            output_nbest_file,
-            output_null_log_odds_file,
-        )
+        # write_predictions(
+        #     eval_examples,
+        #     eval_features,
+        #     all_results,
+        #     FLAGS.n_best_size,
+        #     FLAGS.max_answer_length,
+        #     FLAGS.do_lower_case,
+        #     output_prediction_file,
+        #     output_nbest_file,
+        #     output_null_log_odds_file,
+        # )
 
 
 if __name__ == "__main__":
